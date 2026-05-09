@@ -8,9 +8,11 @@ from typing import Any
 
 import requests
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from common import DroneInfo, DroneStatus, LamportClock, Occurrence, OccurrenceStatus, env_int, log, split_csv
+from dashboard import DASHBOARD_HTML
 
 
 BROKER_ID = env_int("BROKER_ID", 1)
@@ -21,6 +23,7 @@ HEARTBEAT_INTERVAL = env_int("HEARTBEAT_INTERVAL", 2)
 HEARTBEAT_TIMEOUT = env_int("HEARTBEAT_TIMEOUT", 6)
 DISPATCH_INTERVAL = env_int("DISPATCH_INTERVAL", 1)
 DISPATCH_START_DELAY = env_int("DISPATCH_START_DELAY", 5)
+MAX_EVENTS = env_int("MAX_EVENTS", 80)
 
 clock = LamportClock()
 state_lock = threading.RLock()
@@ -28,6 +31,7 @@ occurrences: dict[str, Occurrence] = {}
 drones: dict[str, DroneInfo] = {}
 peer_status: dict[int, dict[str, Any]] = {}
 known_brokers: dict[int, str] = {BROKER_ID: BROKER_URL}
+events: list[dict[str, Any]] = []
 stop_event = threading.Event()
 started_at = time.time()
 
@@ -55,6 +59,14 @@ class PeerState(BaseModel):
 class MissionDone(BaseModel):
     occurrence_id: str
     drone_id: str
+
+
+def broker_log(message: str) -> None:
+    component = f"broker-{BROKER_ID}"
+    log(component, message)
+    with state_lock:
+        events.append({"ts": time.time(), "component": component, "message": message})
+        del events[:-MAX_EVENTS]
 
 
 def peer_id_from_url(url: str) -> int | None:
@@ -130,7 +142,7 @@ def mark_peer_alive(peer_id: int, peer_url: str) -> None:
         known_brokers[peer_id] = peer_url
         previous = peer_status.get(peer_id, {})
         if not previous.get("alive"):
-            log(f"broker-{BROKER_ID}", f"heartbeat: broker {peer_id} ativo em {peer_url}")
+            broker_log(f"heartbeat: broker {peer_id} ativo em {peer_url}")
         peer_status[peer_id] = {"alive": True, "last_seen": time.time(), "url": peer_url}
 
 
@@ -138,12 +150,11 @@ def mark_peer_down(peer_id: int) -> None:
     with state_lock:
         previous = peer_status.get(peer_id, {})
         if previous.get("alive", True):
-            log(f"broker-{BROKER_ID}", f"falha detectada: broker {peer_id} sem heartbeat")
+            broker_log(f"falha detectada: broker {peer_id} sem heartbeat")
         peer_status[peer_id] = {**previous, "alive": False, "last_seen": previous.get("last_seen", 0)}
         for item in occurrences.values():
             if item.status == OccurrenceStatus.PENDING.value and item.origin_broker_id == peer_id:
-                log(
-                    f"broker-{BROKER_ID}",
+                broker_log(
                     f"redistribuindo ocorrencia pendente {item.occurrence_id} do broker {peer_id}",
                 )
 
@@ -178,7 +189,7 @@ def dispatch_loop() -> None:
         try:
             dispatch_once()
         except Exception as exc:
-            log(f"broker-{BROKER_ID}", f"erro no despachante: {exc}")
+            broker_log(f"erro no despachante: {exc}")
         time.sleep(DISPATCH_INTERVAL)
 
 
@@ -213,8 +224,7 @@ def dispatch_once() -> None:
             drone.assigned_occurrence_id = occurrence.occurrence_id
             drone.broker_id = BROKER_ID
             drone.last_seen = time.time()
-            log(
-                f"broker-{BROKER_ID}",
+            broker_log(
                 "reserva: "
                 f"drone={drone.drone_id} ocorrencia={occurrence.occurrence_id} "
                 f"prioridade={occurrence.severity} ts={occurrence.lamport_ts}",
@@ -237,7 +247,7 @@ def notify_drone(drone: DroneInfo, occurrence: Occurrence) -> None:
             if tracked and tracked.assigned_occurrence_id == occurrence.occurrence_id:
                 tracked.status = DroneStatus.BUSY.value
                 tracked.last_seen = time.time()
-        log(f"broker-{BROKER_ID}", f"missao enviada para {drone.drone_id}")
+        broker_log(f"missao enviada para {drone.drone_id}")
     except requests.RequestException:
         with state_lock:
             tracked_drone = drones.get(drone.drone_id)
@@ -248,13 +258,13 @@ def notify_drone(drone: DroneInfo, occurrence: Occurrence) -> None:
             if tracked_occurrence and tracked_occurrence.status != OccurrenceStatus.DONE.value:
                 tracked_occurrence.status = OccurrenceStatus.PENDING.value
                 tracked_occurrence.assigned_drone_id = None
-        log(f"broker-{BROKER_ID}", f"drone {drone.drone_id} indisponivel, liberando ocorrencia")
+        broker_log(f"drone {drone.drone_id} indisponivel, liberando ocorrencia")
     replicate_state()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    log(f"broker-{BROKER_ID}", f"iniciado em {BROKER_URL}; peers={PEERS}")
+    broker_log(f"iniciado em {BROKER_URL}; peers={PEERS}")
     heartbeat = threading.Thread(target=heartbeat_loop, daemon=True)
     dispatcher = threading.Thread(target=dispatch_loop, daemon=True)
     heartbeat.start()
@@ -264,6 +274,12 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title=f"Broker {BROKER_ID}", lifespan=lifespan)
+
+
+@app.get("/", response_class=HTMLResponse)
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard() -> HTMLResponse:
+    return HTMLResponse(DASHBOARD_HTML)
 
 
 @app.get("/heartbeat")
@@ -286,8 +302,7 @@ def create_occurrence(data: OccurrenceIn) -> dict[str, Any]:
     )
     with state_lock:
         occurrences[occurrence.occurrence_id] = occurrence
-    log(
-        f"broker-{BROKER_ID}",
+    broker_log(
         f"ocorrencia criada {occurrence.occurrence_id}: prioridade={occurrence.severity} ts={ts}",
     )
     replicate_state()
@@ -301,7 +316,7 @@ def register_drone(data: DroneRegistration) -> dict[str, Any]:
         if drone and drone.status in {DroneStatus.RESERVED.value, DroneStatus.BUSY.value}:
             drone.callback_url = data.callback_url
             drone.last_seen = time.time()
-            log(f"broker-{BROKER_ID}", f"drone {data.drone_id} manteve estado {drone.status}")
+            broker_log(f"drone {data.drone_id} manteve estado {drone.status}")
             return {"status": drone.status, "broker_id": BROKER_ID}
         drone = DroneInfo(
             drone_id=data.drone_id,
@@ -310,7 +325,7 @@ def register_drone(data: DroneRegistration) -> dict[str, Any]:
             status=DroneStatus.AVAILABLE.value,
         )
         drones[data.drone_id] = drone
-    log(f"broker-{BROKER_ID}", f"drone registrado {data.drone_id} em {data.callback_url}")
+    broker_log(f"drone registrado {data.drone_id} em {data.callback_url}")
     replicate_state()
     return {"status": "registered", "broker_id": BROKER_ID}
 
@@ -325,7 +340,7 @@ def drone_available(data: DroneRegistration) -> dict[str, Any]:
         drone.last_seen = time.time()
         drone.broker_id = BROKER_ID
         drones[data.drone_id] = drone
-    log(f"broker-{BROKER_ID}", f"drone disponivel {data.drone_id}")
+    broker_log(f"drone disponivel {data.drone_id}")
     replicate_state()
     return {"status": "available"}
 
@@ -344,7 +359,7 @@ def mission_done(data: MissionDone) -> dict[str, Any]:
             drone.status = DroneStatus.AVAILABLE.value
             drone.assigned_occurrence_id = None
             drone.last_seen = time.time()
-    log(f"broker-{BROKER_ID}", f"missao concluida: {data.occurrence_id} por {data.drone_id}")
+    broker_log(f"missao concluida: {data.occurrence_id} por {data.drone_id}")
     replicate_state()
     return {"status": "done"}
 
@@ -370,11 +385,13 @@ def state() -> dict[str, Any]:
         return {
             "broker_id": BROKER_ID,
             "broker_url": BROKER_URL,
+            "lamport_ts": clock.value,
             "coordinator_id": coordinator_id(),
             "active_brokers": active_broker_ids(),
-            "known_brokers": known_brokers,
-            "peer_status": peer_status,
+            "known_brokers": dict(known_brokers),
+            "peer_status": {peer_id: dict(status) for peer_id, status in peer_status.items()},
             "pending_queue": [item.to_dict() for item in pending_order],
             "occurrences": [item.to_dict() for item in occurrences.values()],
             "drones": [item.to_dict() for item in drones.values()],
+            "events": list(events),
         }

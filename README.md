@@ -17,6 +17,7 @@ Este projeto implementa um prototipo em Python para coordenacao distribuida de u
 
 - `common.py`: modelos, relogio de Lamport e utilitarios.
 - `broker.py`: fila distribuida, heartbeat, replicacao, registro de drones e despacho de missoes.
+- `dashboard.py`: interface web para visualizar brokers, fila, drones, ocorrencias e eventos.
 - `sensor.py`: gera ocorrencias aleatorias automaticamente.
 - `drone.py`: recebe missoes, simula execucao e reporta conclusao.
 - `docker-compose.yml`: sobe 4 brokers, 4 sensores e 8 drones.
@@ -33,6 +34,17 @@ Consultar o estado de um broker:
 curl http://localhost:8001/state
 curl http://localhost:8002/state
 ```
+
+Abrir a interface web:
+
+```text
+http://localhost:8001/
+http://localhost:8002/
+http://localhost:8003/
+http://localhost:8004/
+```
+
+Cada broker serve o mesmo dashboard a partir do proprio estado replicado. Se um broker cair, abra a porta de outro broker ativo.
 
 Simular queda de broker:
 

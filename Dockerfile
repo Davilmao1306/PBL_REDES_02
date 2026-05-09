@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY common.py broker.py sensor.py drone.py ./
+COPY common.py broker.py sensor.py drone.py dashboard.py ./
 
 ENV PYTHONUNBUFFERED=1
 
