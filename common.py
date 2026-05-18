@@ -56,6 +56,7 @@ class DroneInfo:
     status: str = DroneStatus.AVAILABLE.value
     assigned_occurrence_id: str | None = None
     last_seen: float = field(default_factory=time.time)
+    last_mission_heartbeat: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

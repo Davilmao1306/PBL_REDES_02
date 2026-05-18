@@ -121,6 +121,60 @@ def health() -> dict[str, str | None]:
     with state_lock:
         return {"drone_id": DRONE_ID, "current_broker": current_broker, "current_mission": current_mission}
 
+# NOVA FUNÇÃO AUXILIAR: Envia heartbeats para o broker enquanto a missão acontece
+def send_mission_heartbeats(occurrence_id: str, broker_url: str, stop_heartbeat: threading.Event):
+    payload = {"occurrence_id": occurrence_id, "drone_id": DRONE_ID}
+    while not stop_heartbeat.is_set():
+        brokers = [broker_url] + [b for b in broker_candidates() if b != broker_url]
+        for broker in brokers:
+            try:
+                # O endpoint /drones/register já atualiza o 'last_seen', mas vamos criar 
+                # uma rota explícita ou reutilizar uma para atualizar o status de ocupado.
+                # Para simplificar, vamos enviar para um novo endpoint que criaremos no broker.
+                requests.post(f"{broker}/missions/progress", json=payload, timeout=1)
+                break
+            except requests.RequestException:
+                continue
+        time.sleep(2) # Envia a cada 2 segundos
+
+def finish_mission(occurrence_id: str, broker_url: str) -> None:
+    global current_mission
+    duration = random.randint(MISSION_MIN_SECONDS, MISSION_MAX_SECONDS)
+    log(DRONE_ID, f"executando missao {occurrence_id} por {duration}s")
+    
+    # Dispara a thread de heartbeat da missão
+    stop_heartbeat = threading.Event()
+    hb_thread = threading.Thread(
+        target=send_mission_heartbeats, 
+        args=(occurrence_id, broker_url, stop_heartbeat), 
+        daemon=True
+    )
+    hb_thread.start()
+
+    # Simula a execução da missão
+    time.sleep(duration)
+    
+    # Para os heartbeats da missão antes de reportar a conclusão
+    stop_heartbeat.set()
+    hb_thread.join(timeout=1)
+
+    payload = {"occurrence_id": occurrence_id, "drone_id": DRONE_ID}
+    brokers = [broker_url] + [broker for broker in broker_candidates() if broker != broker_url]
+    for broker in brokers:
+        try:
+            response = requests.post(f"{broker}/missions/done", json=payload, timeout=2)
+            response.raise_for_status()
+            log(DRONE_ID, f"missao {occurrence_id} concluida e reportada para {broker}")
+            break
+        except requests.RequestException:
+            log(DRONE_ID, f"falha ao reportar conclusao para {broker}; tentando outro broker")
+
+    with state_lock:
+        current_mission = None
+    register_as_available()
+
+
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)

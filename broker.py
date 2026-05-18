@@ -187,6 +187,9 @@ def heartbeat_loop() -> None:
 def dispatch_loop() -> None:
     while not stop_event.is_set():
         try:
+            # NOVO: Primeiro verifica se alguma missão falhou e precisa ser resetada
+            check_failed_missions()
+            # Depois tenta despachar a fila normalmente
             dispatch_once()
         except Exception as exc:
             broker_log(f"erro no despachante: {exc}")
@@ -344,6 +347,48 @@ def drone_available(data: DroneRegistration) -> dict[str, Any]:
     replicate_state()
     return {"status": "available"}
 
+class MissionProgress(BaseModel):
+    occurrence_id: str
+    drone_id: str
+
+@app.post("/missions/progress")
+def mission_progress(data: MissionProgress) -> dict[str, Any]:
+    with state_lock:
+        drone = drones.get(data.drone_id)
+        if drone and drone.status == DroneStatus.BUSY.value:
+            drone.last_mission_heartbeat = time.time()
+            drone.last_seen = time.time()
+    replicate_state()
+    return {"status": "heartbeat_received"}
+
+def check_failed_missions() -> None:
+    """Verifica se drones em missão pararam de responder."""
+    if coordinator_id() != BROKER_ID:
+        return
+
+    now = time.time()
+    MISSION_TIMEOUT = 5.0 # Segundos tolerados sem sinal do drone ocupado
+
+    with state_lock:
+        for drone in list(drones.values()):
+            if drone.status == DroneStatus.BUSY.value and drone.assigned_occurrence_id:
+                # Se o drone sumiu da rede ou não mandou sinal da missão
+                if now - drone.last_mission_heartbeat > MISSION_TIMEOUT:
+                    occurrence_id = drone.assigned_occurrence_id
+                    occurrence = occurrences.get(occurrence_id)
+                    
+                    broker_log(f"[ALERTA] Drone {drone.drone_id} caiu durante a missao {occurrence_id}!")
+                    
+                    # Altera o drone para OFFLINE
+                    drone.status = DroneStatus.OFFLINE.value
+                    drone.assigned_occurrence_id = None
+                    
+                    # Devolve a ocorrência para a fila como PENDING
+                    if occurrence and occurrence.status != OccurrenceStatus.DONE.value:
+                        occurrence.status = OccurrenceStatus.PENDING.value
+                        occurrence.assigned_drone_id = None
+                        occurrence.lamport_ts = clock.tick() # Atualiza o relógio para reordenação
+                        broker_log(f"Ocorrencia {occurrence_id} devolvida a fila para outro drone assumir.")
 
 @app.post("/missions/done")
 def mission_done(data: MissionDone) -> dict[str, Any]:
