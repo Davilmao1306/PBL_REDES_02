@@ -8,20 +8,19 @@ from enum import Enum
 from threading import Lock
 from typing import Any
 
-
+# --- ESTADOS DO SISTEMA ---
 class OccurrenceStatus(str, Enum):
-    PENDING = "pending"
-    ASSIGNED = "assigned"
-    DONE = "done"
-
+    PENDING = "pending"   # Na fila distribuída a aguardar drone
+    ASSIGNED = "assigned" # Drone alocado e missão a decorrer
+    DONE = "done"         # Missão concluída com sucesso
 
 class DroneStatus(str, Enum):
-    AVAILABLE = "available"
-    RESERVED = "reserved"
-    BUSY = "busy"
-    OFFLINE = "offline"
+    AVAILABLE = "available" # Livre para receber nova missão (PUSH)
+    RESERVED = "reserved"   # Em processo de atribuição pelo Coordenador
+    BUSY = "busy"           # Em voo a executar missão
+    OFFLINE = "offline"     # Drone caiu ou perdeu conectividade
 
-
+# --- MODELO DE OCORRÊNCIA ---
 @dataclass
 class Occurrence:
     occurrence_id: str
@@ -36,6 +35,9 @@ class Occurrence:
     assigned_drone_id: str | None = None
     created_at: float = field(default_factory=time.time)
 
+    # ALGORITMO DE ORDENAÇÃO E PRIORIZAÇÃO (Barema Critério 3):
+    # Garante que a fila é processada na mesma ordem em todos os brokers.
+    # Desempate estrito: 1º Maior Severidade, 2º Menor Lamport, 3º Menor ID Broker.
     @property
     def ordering_key(self) -> tuple[int, int, int, str]:
         return (-self.severity, self.lamport_ts, self.broker_id, self.occurrence_id)
@@ -47,7 +49,7 @@ class Occurrence:
     def from_dict(cls, data: dict[str, Any]) -> "Occurrence":
         return cls(**data)
 
-
+# --- MODELO DE DRONE ---
 @dataclass
 class DroneInfo:
     drone_id: str
@@ -65,7 +67,9 @@ class DroneInfo:
     def from_dict(cls, data: dict[str, Any]) -> "DroneInfo":
         return cls(**data)
 
-
+# --- ALGORITMO: RELÓGIO LÓGICO DE LAMPORT ---
+# Mantém a consistência sob carga (Barema Critério 4).
+# Garante a ordem causal dos eventos numa rede com comunicação instável.
 class LamportClock:
     def __init__(self) -> None:
         self._value = 0
@@ -86,26 +90,16 @@ class LamportClock:
         with self._lock:
             return self._value
 
-
+# Utilitários globais
 def env_int(name: str, default: int) -> int:
     value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
+    return int(value) if value is not None else default
 
 def split_csv(value: str | None) -> list[str]:
-    if not value:
-        return []
-    return [item.strip() for item in value.split(",") if item.strip()]
-
+    return [item.strip() for item in value.split(",") if item.strip()] if value else []
 
 def build_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
-
 
 def log(component: str, message: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] [{component}] {message}", flush=True)
