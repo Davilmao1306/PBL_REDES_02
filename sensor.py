@@ -6,7 +6,6 @@ import time
 import requests
 from common import build_id, env_int, log, split_csv
 
-# Configurações do Sensor injetadas por variáveis de ambiente
 SENSOR_ID = os.getenv("SENSOR_ID", build_id("sensor"))
 SECTOR_ID = env_int("SECTOR_ID", 1)
 BROKERS = split_csv(os.getenv("BROKERS"))
@@ -14,54 +13,46 @@ INTERVAL_MIN = env_int("INTERVAL_MIN", 3)
 INTERVAL_MAX = env_int("INTERVAL_MAX", 7)
 
 def choose_broker() -> str | None:
-    """
-    Varre a lista de Brokers conhecidos e escolhe o primeiro que responder.
-    Garante que o sensor continue enviando dados mesmo se um broker cair.
-    """
+    """ TOLERÂNCIA A FALHAS DE COMUNICAÇÃO: Procura dinamicamente um broker vivo. """
     candidates = BROKERS[:]
     random.shuffle(candidates)
     for broker in candidates:
         try:
-            # Testa a saúde do broker com um GET rápido
             response = requests.get(f"{broker}/heartbeat", timeout=1.5)
             response.raise_for_status()
             return broker
         except requests.RequestException:
-            continue
+            continue # Tenta o próximo se houver falha de rede
     return None
 
 def main() -> None:
     if not BROKERS:
-        raise SystemExit("Configure BROKERS com uma lista CSV de URLs ex: http://172.16.103.6:8001")
+        raise SystemExit("Configure BROKERS com uma lista CSV de URLs")
 
-    log(SENSOR_ID, f"Iniciado no setor {SECTOR_ID}; monitorando brokers={BROKERS}")
-    
+    log(SENSOR_ID, f"iniciado no setor {SECTOR_ID}; brokers={BROKERS}")
     while True:
         broker = choose_broker()
         if broker is None:
-            log(SENSOR_ID, "Nenhum broker ativo encontrado na rede local. Aguardando...")
+            log(SENSOR_ID, "nenhum broker ativo encontrado; tentando novamente")
             time.sleep(2)
             continue
 
-        # Simulação de telemetria anômala (Incêndio, invasão, etc.)
         severity = random.randint(1, 5)
         payload = {
             "sector_id": SECTOR_ID,
             "severity": severity,
             "sensor_id": SENSOR_ID,
-            "description": f"Alerta de telemetria critica no setor {SECTOR_ID}, severidade {severity}",
+            "description": f"telemetria anomala no setor {SECTOR_ID}, severidade {severity}",
         }
-        
         try:
-            # PROTOCOLO HTTP POST: Injeta o problema na fila global do Broker escolhido
+            # ARQUITETURA PUSH: O sensor "empurra" a anomalia para o broker ativo
             response = requests.post(f"{broker}/occurrences", json=payload, timeout=2)
             response.raise_for_status()
             data = response.json()
-            log(SENSOR_ID, f"Ocorrencia {data['occurrence_id']} gerada com sucesso no broker {broker}")
+            log(SENSOR_ID, f"ocorrencia enviada para {broker}: {data['occurrence_id']}")
         except requests.RequestException:
-            log(SENSOR_ID, f"Falha de rede ao reportar para {broker}. Tentando reenviar no proximo ciclo.")
+            log(SENSOR_ID, f"falha ao enviar para {broker}; reconectando")
 
-        # Aguarda um tempo aleatório antes de ler os sensores novamente
         time.sleep(random.randint(INTERVAL_MIN, INTERVAL_MAX))
 
 if __name__ == "__main__":
