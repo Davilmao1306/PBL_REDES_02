@@ -1,61 +1,76 @@
 # 🚁 Infraestrutura Distribuída para Coordenação de Drones Marítimos
 
-**Problema 2 — Desbloqueio do Estreito de Ormuz (PBL Redes de Computadores)**
+**Problema 2 — Desbloqueio do Estreito de Ormuz (PBL de Redes de Computadores)**
 
-Este projeto implementa uma arquitetura de sistemas distribuídos para coordenar uma frota autônoma de drones em um cenário de monitoramento marítimo crítico. O sistema resolve desafios de concorrência, alocação de recursos compartilhados e tolerância a falhas sem depender de um servidor central, empregando algoritmos de coordenação descentralizada.
-
----
-
-## 🌊 Contexto do Problema
-
-Devido à instabilidade no Estreito de Ormuz, foi necessária a criação de uma força-tarefa para estabilização logística. A área foi dividida em setores marítimos, cada um monitorado por sensores autônomos e gerenciado por **Brokers** descentralizados. Uma frota de **Drones** atua como recurso compartilhado entre todos os setores, atendendo ocorrências como embarcações à deriva ou bloqueios de rotas. 
-
-O desafio central desta solução é **garantir a alocação correta e priorizada de drones em um ambiente de rede instável, sem pontos únicos de falha e sem permitir o envio de dois drones para a mesma missão.**
+Este repositório contém a solução para o problema de coordenação distribuída e descentralizada de uma frota partilhada de drones autónomos de monitorização marítima, aplicados na escolta de comboios civis e reconhecimento de rotas seguras no Estreito de Ormuz.
 
 ---
 
-## 🏗️ Arquitetura da Solução
+## 🌊 Contexto e Desafio Operacional
 
-O sistema emprega uma arquitetura **P2P (Peer-to-Peer) Híbrida** (Brokers descentralizados), dividida nos seguintes papéis:
+Face à instabilidade geopolítica no Estreito de Ormuz e aos seus impactos na economia e abastecimento logístico, a área operacional foi dividida em setores marítimos autónomos. Cada setor possui os seus próprios recursos (radares costeiros, boias inteligentes, sensores navais). No entanto, a frota de drones é um **recurso partilhado** por todos os setores.
 
-* **📡 Sensores (IoT):** Geradores de dados autônomos. Enviam requisições de anomalias com níveis de severidade (1 a 5) para qualquer Broker ativo.
-* **🧠 Brokers (Gerenciadores de Setor):** Mantêm a fila distribuída de requisições. Eles se comunicam constantemente para replicar estado (Snapshot Anti-Entropia) e elegem um Coordenador dinâmico.
-* **🚁 Drones (Executores):** Frota compartilhada. Possuem um servidor HTTP interno para receber ordens do broker coordenador, reportando sinais de vida (*heartbeats*) durante os voos.
+O sistema opera sob condições severas: **comunicação altamente instável**, grande volume de eventos simultâneos e destruição de equipamentos. A solução elimina qualquer ponto único de falha e resolve conflitos de concorrência na alocação de recursos através de algoritmos distribuídos.
 
-### 🔌 Protocolo de Comunicação
-* Todo o ecossistema utiliza chamadas **HTTP (REST)** sobre o protocolo **TCP**, encapsulando as mensagens no formato **JSON**.
-* Padrões de requisições tolerantes a falhas: Uso estrito de `timeouts` para evitar travamento em chamadas perdidas.
+---
+
+## 🏗️ Estilo Arquitetural
+
+O sistema adota o estilo arquitetural **P2P (Peer-to-Peer) Híbrido baseado em Brokers Distribuídos**. Não existe um servidor centralizador.
+* **📡 Sensores (IoT):** Dispositivos autónomos que monitorizam o oceano e injetam requisições de anomalias (ocorrências com severidade de 1 a 5) nos brokers.
+* **🧠 Brokers de Setor:** Nós da rede distribuída que gerem as filas de cada setor, replicam estados entre si e elegem um coordenador temporário.
+* **🚁 Drones Autónomos:** Unidades de execução que respondem a comandos, realizam as missões simuladas e reportam a sua disponibilidade.
+
+---
+
+## 🔌 Paradigma de Comunicação: Arquitetura PUSH
+
+Uma das principais decisões de projeto desta infraestrutura foi a escolha de uma **Arquitetura Baseada em PUSH** para o fluxo de mensagens, em detrimento de uma abordagem baseada em PULL (Polling).
+
+
+
+### Como funciona o Modelo PUSH no sistema:
+1. **Injeção de Alertas (Sensor ➡️ Broker):** Quando um sensor deteta uma anomalia, ele **empurra (Push)** os dados imediatamente para o endpoint `/occurrences` de um broker ativo via HTTP POST.
+2. **Despacho de Missões (Coordenador ➡️ Drone):** Os drones expõem um servidor HTTP interno (FastAPI). Quando o Broker Coordenador decide alocar uma missão, ele faz um **Push** ativando o endpoint `/mission` do drone escolhido.
+3. **Sinal de Vida em Voo (Drone ➡️ Brokers):** Durante a execução da missão, o drone **empurra (Push)** atualizações periódicas a cada 2 segundos para manter o seu registo de atividade (`last_seen`) atualizado nos brokers.
+
+### Justificação Técnica: Porquê PUSH e não PULL?
+Num modelo **PULL**, os drones teriam de efetuar requisições contínuas (*polling*) aos brokers perguntando: *"Há algum trabalho para mim?"*. Isto violaria as restrições do problema pelos seguintes motivos:
+* **Desperdício de Banda numa Rede Instável:** Manter 8 ou mais drones a inundar a rede com requisições HTTP em loops infinitos consumiria largura de banda preciosa num canal de comunicação já debilitado e instável como o do estreito.
+* **Latência de Atendimento:** No modelo Pull, se um drone demorasse 3 segundos entre verificações, uma ocorrência Crítica (Severidade 5) poderia ficar à espera do próximo ciclo. Com o modelo **Push**, o broker atômico delega a missão **no milissegundo exato** em que a ocorrência entra na fila e um drone fica livre, garantindo tempo real de resposta.
 
 ---
 
 ## ⚙️ Concorrência e Algoritmos Distribuídos
 
-Para atender aos requisitos estritos de concorrência, as seguintes técnicas foram implementadas:
+Para assegurar a consistência dos dados e cumprir rigorosamente as restrições operacionais, foram aplicados os seguintes algoritmos:
 
-1. **Ordenação de Fila e Lamport Clock:**
-   A escolha da próxima ocorrência obedece a um critério de desempate determinístico para evitar colisões:
-   * **1º:** Maior Severidade (1 a 5).
-   * **2º:** Menor *Relógio Lógico de Lamport* (Garante a ordem causal em nós assíncronos).
-   * **3º:** Menor ID do Broker originário.
+### 1. Ordenação Causal com Relógio Lógico de Lamport
+Para mitigar os atrasos e falhas de rede, cada evento possui um carimbo de tempo lógico (`LamportClock`). A fila distribuída ordena as prioridades com base numa chave de ordenação estrita (`ordering_key`):
+$$\text{Prioridade} = \text{Maior Severidade} \rightarrow \text{Menor Timestamp de Lamport} \rightarrow \text{Menor ID do Broker}$$
+Isto garante que todos os brokers reconstruam a fila **exatamente na mesma ordem**, independentemente de quando as mensagens chegam fisicamente.
 
-2. **Exclusão Mútua Distribuída (Eleição de Líder):**
-   Não há "servidor chefe". O sistema descobre os pares ativos e define como **Coordenador Temporário** o Broker online com o **menor ID**. Apenas este coordenador tem a permissão de casar drones livres com ocorrências pendentes, garantindo **exclusão mútua** absoluta (zero duplicidade na alocação).
+### 2. Exclusão Mútua Distribuída (Eleição de Líder)
+Para garantir que **um mesmo drone nunca seja reservado para duas missões simultâneas** e que **não haja duplicidade de cobertura** na mesma área, o sistema elege deterministicamente um **Coordenador Temporário**. 
+* O coordenador ativo será sempre o broker online que possuir o **menor ID numérico** (ex: `broker-1`).
+* Apenas este líder tem autorização para executar o loop de despacho (`dispatch_once()`), atuando como o trinco (*lock*) centralizado de exclusão mútua da rede distributed.
 
-3. **Tolerância a Falhas e Replanejamento:**
-   * **Falha de Broker:** Monitorada via *Heartbeat* a cada 2s. Se um broker morre, a rede redistribui suas ocorrências pendentes e, se ele era o coordenador, o próximo ID assume instantaneamente.
-   * **Falha de Drone (Abatido/Desconectado):** Durante uma missão, o drone emite sinais de progresso. Se o Coordenador ficar 6 segundos sem ouvir o drone ocupado, ele é declarado **OFFLINE**, e a ocorrência é devolvida para a Fila Distribuída, acionando o envio de um novo drone livre.
+### 3. Tolerância a Falhas e Replaneamento Automático
+* **Queda de Broker:** Os brokers vigiam-se mutonamente via *Heartbeats* a cada 2s. Se o líder cair, o próximo menor ID ativo assume as rédeas do despacho imediatamente.
+* **Queda de Drone em Missão:** Graças ao fluxo contínuo de **Push Heartbeats** do drone, se ele for abatido ou perder o sinal, o Coordenador deteta a ausência de sinal em mais de 6 segundos, altera o estado do drone para `OFFLINE` e faz o **replaneamento**, devolvendo a ocorrência para a fila como `PENDING` para que outro drone a assuma.
 
 ---
 
 ## 🚀 Como Executar o Projeto
 
-O projeto utiliza **Docker** para garantir o isolamento total dos processos, emulando máquinas físicas distintas em uma mesma rede virtual.
+O ambiente é totalmente isolado e emulado através de contentores **Docker**.
 
 ### Pré-requisitos
+* Git instalado.
 * Docker e Docker Compose instalados.
 
-### Subindo a Malha Completa
-O `docker-compose.yml` está configurado para subir automaticamente **4 Brokers, 4 Sensores e 8 Drones**:
-
+### 1. Clonar ou Atualizar o Código
+Para descarregar o repositório original:
 ```bash
-docker compose up --build
+git clone [https://github.com/davilmao1306/pbl_redes_02.git](https://github.com/davilmao1306/pbl_redes_02.git)
+cd pbl_redes_02
